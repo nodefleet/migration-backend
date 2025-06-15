@@ -1,0 +1,37 @@
+{
+  "name": "pokt-migration-backend",
+  "version": "1.0.0",
+  "description": "Backend service for executing POKT Morse to Shannon migrations",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "docker:build": "docker build -t pokt-migration-backend .",
+    "docker:run": "docker run -p 3001:3001 -v $(pwd)/data:/app/data pokt-migration-backend",
+    "docker:compose": "docker-compose up --build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "fs-extra": "^11.1.1",
+    "helmet": "^7.1.0",
+    "joi": "^17.11.0",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": [
+    "pokt",
+    "pocket-network",
+    "migration",
+    "morse",
+    "shannon",
+    "blockchain"
+  ],
+  "author": "POKT UI Team",
+  "license": "MIT"
+}
