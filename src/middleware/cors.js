@@ -1,39 +1,8 @@
 const cors = require('cors');
 
-// CORS configuration for migration backend
+// CORS configuration for migration backend - ALLOW ALL ORIGINS
 const corsOptions = {
-    origin: function (origin, callback) {
-        // Allow requests with no origin (e.g., mobile apps, Electron)
-        if (!origin) return callback(null, true);
-
-        // Define allowed origins
-        const allowedOrigins = [
-            'http://localhost:3000',  // React development server
-            'http://localhost:5173',  // Vite development server  
-            'http://localhost:4173',  // Vite preview server
-            'https://pokt-ui.vercel.app',  // Production deployment
-            'https://*.vercel.app',    // Vercel preview deployments
-            process.env.FRONTEND_URL  // Environment variable for custom domain
-        ].filter(Boolean); // Remove any undefined values
-
-        // Check if origin is allowed
-        const isAllowed = allowedOrigins.some(allowedOrigin => {
-            if (allowedOrigin.includes('*')) {
-                // Handle wildcard patterns
-                const pattern = allowedOrigin.replace(/\*/g, '.*');
-                const regex = new RegExp(`^${pattern}$`);
-                return regex.test(origin);
-            }
-            return allowedOrigin === origin;
-        });
-
-        if (isAllowed) {
-            callback(null, true);
-        } else {
-            console.warn(`🚫 CORS blocked origin: ${origin}`);
-            callback(new Error('Not allowed by CORS policy'));
-        }
-    },
+    origin: '*', // Allow all origins
     credentials: true, // Allow cookies and authorization headers
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: [

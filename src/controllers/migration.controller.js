@@ -1,9 +1,16 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const MigrationExecutor = require('../services/MigrationExecutor');
+const MigrationExecutor = require('../services/migration-executor');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 class MigrationController {
+    constructor() {
+        this.migrationExecutor = new MigrationExecutor();
+    }
+
     async executeMigration(req, res) {
         try {
             const { morsePrivateKey, shannonAddress } = req.body;
@@ -76,6 +83,69 @@ class MigrationController {
                 error: 'Internal server error',
                 details: error.message,
                 sessionId: req.body.sessionId || 'unknown'
+            });
+        }
+    }
+
+    async importWallets(req, res) {
+        try {
+            const { wallets } = req.body;
+            const sessionId = uuidv4();
+
+            if (!Array.isArray(wallets) || wallets.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Se requiere un array de wallets no vacío',
+                    session: sessionId
+                });
+            }
+
+            console.log(`🔑 Procesando ${wallets.length} wallets para importación`);
+
+            const importResults = [];
+            for (const wallet of wallets) {
+                try {
+                    // Usar el método de importación del MigrationExecutor
+                    const walletName = `wallet-${uuidv4().substring(0, 8)}`;
+                    const result = await this.migrationExecutor.importPrivateKeyToKeyring(wallet, walletName);
+
+                    if (result.success) {
+                        importResults.push({
+                            wallet: wallet.substring(0, 10) + '...', // Solo mostramos parte del wallet por seguridad
+                            success: true,
+                            poktAddress: result.poktAddress,
+                            ethAddress: result.ethAddress,
+                            originalWallet: result.originalWallet,
+                            name: walletName
+                        });
+                    } else {
+                        throw new Error(result.error);
+                    }
+                } catch (error) {
+                    console.error('❌ Error importando wallet:', error);
+                    importResults.push({
+                        wallet: wallet.substring(0, 10) + '...',
+                        success: false,
+                        error: error.message
+                    });
+                }
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    sessionId,
+                    results: importResults
+                }
+            });
+
+        } catch (error) {
+            console.error('❌ Error en importación de wallets:', error);
+            return res.status(500).json({
+                success: false,
+                error: 'Error interno del servidor',
+                details: error.message,
+                sessionId: uuidv4()
             });
         }
     }

@@ -24,7 +24,7 @@ RUN npm install
 RUN mkdir -p /app/bin
 
 # Install Pocket Network CLI v0.1.19 - Direct binary download
-RUN wget -q https://github.com/pokt-network/poktroll/releases/download/v0.1.19/pocket_linux_amd64.tar.gz -O /tmp/pocket.tar.gz && \
+RUN wget -q https://github.com/pokt-network/poktroll/releases/download/v0.1.26/pocket_linux_amd64.tar.gz -O /tmp/pocket.tar.gz && \
     tar -xzf /tmp/pocket.tar.gz -C /app/bin && \
     chmod +x /app/bin/pocketd && \
     ln -sf /app/bin/pocketd /usr/local/bin/pocketd && \

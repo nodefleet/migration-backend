@@ -27,10 +27,17 @@ class MigrationExecutor {
 
     /**
      * Execute complete migration process
+     * @param {Object} migrationData - Migration data
+     * @param {Object} options - Options for migration
+     * @param {string} options.network - Network to use (beta or testnet)
      */
     async executeMigration(migrationData, options = {}) {
         const sessionId = uuidv4();
         console.log(`🚀 Starting migration session: ${sessionId}`);
+
+        // Get network from options or default to beta
+        const network = options.network || 'beta';
+        console.log(`🌐 Using network: ${network}`);
 
         try {
             // Validate inputs
@@ -52,14 +59,15 @@ class MigrationExecutor {
                 console.log(`📍 Shannon Signature recibida: ${migrationData.shannonAddress.signature.substring(0, 20)}...`);
             }
 
-            console.log(`🎯 Starting CLI migration with claim-accounts...`);
+            console.log(`🎯 Starting CLI migration with claim-accounts on network ${network}...`);
 
             // Execute migration command with the FULL list of Morse private keys
             const result = await this.runMigrationCommand(
                 migrationData.morsePrivateKeys,
                 migrationData.shannonAddress?.address || migrationData.signingAccount,
                 migrationData.shannonAddress?.signature,
-                sessionId
+                sessionId,
+                network
             );
 
             console.log(`✅ Migration session completed: ${sessionId}`);
@@ -67,7 +75,8 @@ class MigrationExecutor {
                 success: true,
                 sessionId,
                 result,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
+                network
             };
 
         } catch (error) {
@@ -80,7 +89,8 @@ class MigrationExecutor {
                 success: false,
                 sessionId,
                 error: error.message,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
+                network
             };
         }
     }
@@ -273,8 +283,9 @@ class MigrationExecutor {
      * @param {string} shannonAddress – Shannon destination address
      * @param {string} shannonSignature – Hex signature of Shannon private key (optional)
      * @param {string} sessionId – unique identifier for this session
+     * @param {string} network – Network to use (beta or testnet)
      */
-    async runMigrationCommand(morsePrivateKeys, shannonAddress, shannonSignature, sessionId) {
+    async runMigrationCommand(morsePrivateKeys, shannonAddress, shannonSignature, sessionId, network = 'beta') {
         try {
             // Crear directorios necesarios
             await this.initializeDirectories();
@@ -306,9 +317,6 @@ class MigrationExecutor {
             const inputFilePath = path.resolve(path.join(this.inputDir, `migration-input-${sessionId}.json`));
             await fs.writeFile(inputFilePath, JSON.stringify(cleanedKeys), 'utf8');
 
-            const shannonKeyName = `shannon-${sessionId.substring(0, 8)}`;
-
-            // Generar un nombre aleatorio para el keyring-backend
             const keyringBackend = `test`;
 
             // Crear un directorio específico para este keyring
@@ -318,38 +326,179 @@ class MigrationExecutor {
             }
 
             // IMPORTAR LA CUENTA SHANNON
+            const shannonKeyName = `shannon-${sessionId.substring(0, 8)}`;
+            let useAliceForSigning = false;
+
+            // Vaciar el keyring antes de importar la clave Shannon
+            try {
+                console.log('🧹 Limpiando el keyring antes de importar la clave Shannon...');
+
+                // Listar todas las claves existentes
+                const { stdout: existingKeys } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home=${homeDir} --keyring-backend=${keyringBackend}`, {
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
+
+                console.log('🔑 Claves existentes en el keyring:');
+                console.log(existingKeys);
+
+                // Eliminar todas las claves existentes
+                const keyLines = existingKeys.split('\n');
+                for (const line of keyLines) {
+                    if (line.includes('name:')) {
+                        const keyName = line.replace('- name:', '').trim();
+                        if (keyName) {
+                            try {
+                                console.log(`🗑️ Eliminando clave: ${keyName}`);
+                                await execAsync(`${process.cwd()}/bin/pocketd keys delete ${keyName} --home=${homeDir} --keyring-backend=${keyringBackend} --yes`, {
+                                    timeout: 10000,
+                                    env: {
+                                        ...process.env,
+                                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                    }
+                                });
+                            } catch (deleteError) {
+                                console.error(`⚠️ Error al eliminar clave ${keyName}:`, deleteError.message);
+                            }
+                        }
+                    }
+                }
+
+                console.log('✅ Keyring limpiado correctamente');
+            } catch (cleanError) {
+                console.error('⚠️ Error al limpiar el keyring:', cleanError.message);
+            }
+
             if (shannonSignature) {
                 try {
-                    // Limpiar el hexadecimal (quitar 0x si existe)
+                    // Limpiar espacios
                     let cleanSignature = shannonSignature.trim();
-                    if (cleanSignature.startsWith('0x')) {
-                        cleanSignature = cleanSignature.substring(2);
-                    }
 
-                    // Importar la clave Shannon directamente como hexadecimal
-                    const importShannonCmd = `${process.cwd()}/bin/pocketd keys import-hex ${shannonKeyName} "${cleanSignature}" --home=${homeDir} --keyring-backend=${keyringBackend}`;
-                    const { stdout: shannonImportOutput, stderr: shannonImportError } = await execAsync(importShannonCmd, {
-                        timeout: 30000,
-                        env: {
-                            ...process.env,
-                            PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    // Detectar si es una mnemónica (frase semilla)
+                    const wordCount = cleanSignature.split(' ').length;
+                    const isMnemonic = wordCount >= 12 && wordCount <= 24;
+
+                    if (isMnemonic) {
+                        console.log(`Detectada mnemónica Shannon (${wordCount} palabras)`);
+
+                        try {
+                            // Crear un archivo temporal con la mnemónica
+                            const mnemonicFile = path.join(this.tempDir, `mnemonic-${sessionId}.txt`);
+                            await fs.writeFile(mnemonicFile, cleanSignature);
+
+                            // Usar el comando add con --recover y --source para importar desde archivo
+                            const importCmd = `${process.cwd()}/bin/pocketd keys add ${shannonKeyName} --recover --source=${mnemonicFile} --home=${homeDir} --keyring-backend=${keyringBackend}`;
+
+                            const { stdout, stderr } = await execAsync(importCmd, {
+                                timeout: 30000,
+                                env: {
+                                    ...process.env,
+                                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                }
+                            });
+
+                            // Eliminar el archivo temporal
+                            await fs.unlink(mnemonicFile);
+
+                            console.log(`✅ Clave Shannon importada desde mnemónica: ${stdout}`);
+                        } catch (importError) {
+                            // Verificar si el error es porque la clave ya existe
+                            if (importError.stderr && importError.stderr.includes('duplicated address')) {
+                                console.log(`✅ La clave Shannon ya existe en el keyring, continuando...`);
+                            } else {
+                                // Si es otro error, usamos alice como fallback
+                                console.error('Error importing Shannon key:', importError.message);
+                                if (importError.stderr) console.error('Error details:', importError.stderr);
+                                useAliceForSigning = true;
+                            }
                         }
-                    });
+                    } else {
+                        // Quitar 0x si existe (para claves hex)
+                        if (cleanSignature.startsWith('0x')) {
+                            cleanSignature = cleanSignature.substring(2);
+                        }
+
+                        try {
+                            // Importar la clave Shannon como hexadecimal
+                            const importShannonCmd = `${process.cwd()}/bin/pocketd keys import-hex ${shannonKeyName} "${cleanSignature}" --home=${homeDir} --keyring-backend=${keyringBackend}`;
+                            const { stdout, stderr } = await execAsync(importShannonCmd, {
+                                timeout: 30000,
+                                env: {
+                                    ...process.env,
+                                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                }
+                            });
+
+                            console.log(`✅ Clave Shannon importada como hex: ${stdout}`);
+                        } catch (importError) {
+                            // Verificar si el error es porque la clave ya existe
+                            if (importError.stderr && (importError.stderr.includes('duplicated address') || importError.stderr.includes('already exists'))) {
+                                console.log(`✅ La clave Shannon ya existe en el keyring, continuando...`);
+                            } else {
+                                // Si es otro error, usamos alice como fallback
+                                console.error('Error importing Shannon key:', importError.message);
+                                if (importError.stderr) console.error('Error details:', importError.stderr);
+                                useAliceForSigning = true;
+                            }
+                        }
+                    }
                 } catch (shannonImportError) {
                     console.error('Error importing Shannon key:', shannonImportError.message);
+                    if (shannonImportError.stderr) console.error('Error details:', shannonImportError.stderr);
+                    useAliceForSigning = true;
                 }
+            } else {
+                // Si no hay firma Shannon, usamos alice
+                useAliceForSigning = true;
             }
 
             // Verificar que las claves se importaron correctamente
-            const { stdout: keyInfo } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home=${homeDir} --keyring-backend=${keyringBackend}`, {
-                timeout: 10000,
-                env: {
-                    ...process.env,
-                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+            try {
+                const { stdout: keyInfo } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home=${homeDir} --keyring-backend=${keyringBackend}`, {
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
+
+                console.log('🔑 Available keys in keyring:');
+                console.log(keyInfo);
+
+                // Si la clave Shannon no está en la lista, usar alice
+                if (!keyInfo.includes(shannonKeyName)) {
+                    console.log(`⚠️ Shannon key ${shannonKeyName} not found in keyring, using alice instead`);
+                    useAliceForSigning = true;
                 }
-            });
+            } catch (error) {
+                console.error('Error listing keys:', error);
+                useAliceForSigning = true;
+            }
+
+            // Determinar qué clave usar para firmar
+            const signingKeyName = useAliceForSigning ? 'alice' : shannonKeyName;
+            console.log(`🔑 Using ${signingKeyName} for signing the transaction`);
+
             // Definir archivo de salida
             const outputFilePath = path.resolve(path.join(this.outputDir, `migration-output-${sessionId}.json`));
+
+            // Configurar parámetros según la red
+            let chainId, nodeUrl, net;
+            if (network === 'mainnet') {
+                net = 'main'
+                chainId = 'pocket';
+                nodeUrl = 'https://shannon-grove-rpc.mainnet.poktroll.com';
+            } else {
+                // Default: beta
+                net = 'beta'
+                chainId = 'pocket-beta';
+                nodeUrl = 'https://rpc.shannon-testnet.eu.nodefleet.net';
+            }
+
+            console.log(`🌐 Using network: ${network}, chain-id: ${chainId}, node: ${nodeUrl}`);
 
             // El comando de migración exactamente como lo usó jorgecuesta
             const command = `pocketd tx migration claim-accounts` +
@@ -357,14 +506,15 @@ class MigrationExecutor {
                 ` --output-file=${outputFilePath}` +
                 ` --home=${homeDir}` +
                 ` --keyring-backend=${keyringBackend}` +
-                ` --from=${shannonKeyName}` +
+                ` --from=${signingKeyName}` +
                 ` --unsafe --unarmored-json` +
-                ` --network=main` +
-                ` --chain-id=pocket` +
+                ` --destination=${shannonAddress}` +
+                ` --network=${net}` +
+                ` --chain-id=${chainId}` +
                 ` --gas=auto` +
                 ` --gas-adjustment=1.1` +
                 ` --gas-prices=0.001upokt` +
-                ` --node=https://shannon-grove-rpc.mainnet.poktroll.com` +
+                ` --node=${nodeUrl}` +
                 ` --yes`;
 
             try {
@@ -390,7 +540,8 @@ class MigrationExecutor {
                             txCode: outputData.tx_code || 0,
                             accountsMigrated: outputData.mappings ? outputData.mappings.length : 0,
                             error: null,
-                            method: 'cli_claim_accounts'
+                            method: 'cli_claim_accounts',
+                            network: network
                         };
                     } catch (jsonError) {
                         throw new Error(`Failed to parse output file: ${jsonError.message}`);
@@ -413,7 +564,8 @@ class MigrationExecutor {
                 success: false,
                 error: error.message,
                 details: error.toString(),
-                method: 'cli_claim_accounts'
+                method: 'cli_claim_accounts',
+                network: network
             };
         }
     }
@@ -613,113 +765,76 @@ class MigrationExecutor {
         try {
             console.log(`🔑 Importing private key to keyring for: ${name}`);
 
-            // Detectar si es un JSON de wallet Morse
-            let actualPrivateKey = privateKeyHex;
-            let walletName = name;
+            // Extraer la dirección ETH original si es un JSON de wallet
+            let ethAddress = null;
+            let cleanPrivateKey = privateKeyHex;
 
             if (typeof privateKeyHex === 'string' && privateKeyHex.trim().startsWith('{')) {
                 try {
-                    const morseWallet = JSON.parse(privateKeyHex);
-                    console.log(`📋 Detected Morse wallet JSON format for: ${morseWallet.name || 'Unknown'}`);
-
-                    // Usar SOLO el private key del JSON
-                    if (morseWallet.priv) {
-                        actualPrivateKey = morseWallet.priv;
-                    } else {
-                        throw new Error('Missing private key field (priv) in Morse wallet JSON');
+                    const walletData = JSON.parse(privateKeyHex);
+                    if (walletData.addr) {
+                        ethAddress = walletData.addr;
+                        console.log(`📋 Found original ETH address: ${ethAddress}`);
                     }
-
-                    // Crear un nombre seguro para el keyring (sin caracteres especiales)
-                    walletName = name || `wallet${Date.now()}`;
-                    console.log(`📋 Using safe wallet name: ${walletName}`);
+                    if (walletData.priv) {
+                        cleanPrivateKey = walletData.priv;
+                        console.log(`📋 Using private key from wallet JSON`);
+                    }
                 } catch (e) {
-                    console.log('📋 Not a JSON format, using as raw private key:', e.message);
+                    console.log('📋 Not a valid JSON wallet format:', e.message);
                 }
             }
 
             // Limpiar el hex (remover 0x si está presente)
-            let cleanHex = actualPrivateKey.trim().startsWith('0x')
-                ? actualPrivateKey.trim().substring(2)
-                : actualPrivateKey.trim();
+            let cleanHex = cleanPrivateKey.trim().startsWith('0x')
+                ? cleanPrivateKey.trim().substring(2)
+                : cleanPrivateKey.trim();
 
             console.log(`📍 Using private key with length: ${cleanHex.length}`);
 
-            // Validar formato de clave privada
-            if (!/^[0-9a-fA-F]{64,128}$/.test(cleanHex)) {
-                throw new Error(`Invalid private key format. Expected 64 or 128 hex characters, got ${cleanHex.length}`);
-            }
+            // Usar la ruta correcta a pocketd
+            const pocketdPath = `${process.cwd()}/bin/pocketd`;
 
-            // Determinar el directorio home para pocketd
-            let homeDir = './localnet/pocketd';
-            try {
-                await fs.access(homeDir);
-                console.log(`✅ Using existing home directory: ${homeDir}`);
-            } catch {
-                // Si no existe, usar un directorio temporal
-                homeDir = path.join(this.tempDir, 'pocketd-home');
-                await fs.mkdir(homeDir, { recursive: true });
-                console.log(`📁 Created temporary home directory: ${homeDir}`);
-            }
+            // Importar la clave con el formato simplificado
+            const importCmd = `${pocketdPath} keys import-hex ${name} ${cleanHex} --keyring-backend test`;
+            await execAsync(importCmd, {
+                timeout: 30000
+            });
 
-            // Eliminar la clave si ya existe para evitar errores
-            try {
-                console.log(`🗑️ Removing existing key if present: ${walletName}`);
-                await execAsync(`/usr/bin/pocketd keys delete ${walletName} --home ${homeDir} --keyring-backend test --yes`, {
+            // Obtener la dirección usando list
+            const { stdout } = await execAsync(
+                `${pocketdPath} keys list --keyring-backend test`,
+                {
                     timeout: 10000
-                });
-            } catch (e) {
-                // Ignorar errores al eliminar
-            }
-
-            // Importar usando el comando import-hex que es para claves hexadecimales
-            // SOLO mostrar parte de la clave por seguridad en logs
-            console.log(`🔑 Executing import-hex command: /usr/bin/pocketd keys import-hex ${walletName} ${cleanHex.substring(0, 10)}... --home ${homeDir} --keyring-backend test`);
-
-            // IMPORTANTE: Usar comillas para evitar problemas con caracteres especiales
-            const importCmd = `/usr/bin/pocketd keys import-hex ${walletName} "${cleanHex}" --home=${homeDir} --keyring-backend=test`;
-
-            try {
-                const { stdout, stderr } = await execAsync(importCmd, {
-                    timeout: 30000
-                });
-                console.log('📋 Import result:', { stdout, stderr });
-
-                if (stderr && !stderr.includes('successfully')) {
-                    console.warn(`⚠️ Import warning: ${stderr}`);
                 }
-            } catch (importError) {
-                console.error('❌ Import error:', importError.message);
-                if (importError.stdout) console.log('📋 Import stdout:', importError.stdout);
-                if (importError.stderr) console.log('📋 Import stderr:', importError.stderr);
+            );
 
-                // Solo fallar si no contiene "already exists"
-                if (importError.stderr &&
-                    !(importError.stderr.includes('already exists') ||
-                        importError.stderr.includes('already imported'))) {
-                    throw new Error(`Import failed: ${importError.message}`);
-                } else {
-                    console.log('✅ Key already exists, continuing...');
+            // Extraer la dirección del output que corresponde a nuestra clave
+            let poktAddress = null;
+            const lines = stdout.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes(`name: ${name}`)) {
+                    // Buscar la línea de dirección anterior
+                    if (i > 0 && lines[i - 1].includes('address:')) {
+                        const addressLine = lines[i - 1].trim();
+                        poktAddress = addressLine.replace('- address:', '').trim();
+                        break;
+                    }
                 }
             }
 
-            // Verificar que la clave está en el keyring
-            try {
-                const { stdout } = await execAsync(`/usr/bin/pocketd keys show ${walletName} --home ${homeDir} --keyring-backend test`, {
-                    timeout: 10000
-                });
-                console.log('✅ Key successfully imported and verified:', stdout);
-            } catch (verifyError) {
-                console.error('❌ Key verification error:', verifyError.message);
-                throw new Error('Key could not be verified after import');
-            }
-
-            // Guardar el directorio home para uso posterior
-            this.homeDir = homeDir;
-            return true;
-
+            return {
+                success: true,
+                poktAddress: poktAddress,
+                ethAddress: ethAddress,
+                originalWallet: ethAddress ? true : false
+            };
         } catch (error) {
             console.error('❌ Failed to import key to keyring:', error);
-            throw new Error(`Key import failed: ${error.message}`);
+            return {
+                success: false,
+                error: error.message
+            };
         }
     }
 }

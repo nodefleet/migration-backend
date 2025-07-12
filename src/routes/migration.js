@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const { v4: uuidv4 } = require('uuid');
 const MigrationExecutor = require('../services/migration-executor');
+const migrationController = require('../controllers/migration.controller');
 
 const router = express.Router();
 const migrationExecutor = new MigrationExecutor();
@@ -39,7 +40,7 @@ const migrationSchema = Joi.object({
  */
 router.post('/migrate', async (req, res) => {
     try {
-        const { morseWallets, shannonAddress } = req.body;
+        const { morseWallets, shannonAddress, network } = req.body;
 
         if (!morseWallets || !Array.isArray(morseWallets) || morseWallets.length === 0) {
             return res.status(400).json({
@@ -74,6 +75,18 @@ router.post('/migrate', async (req, res) => {
             });
         }
 
+        // Validar el parámetro network si está presente
+        let networkValue = 'beta'; // Valor por defecto
+        if (network) {
+            if (typeof network !== 'string' || !['beta', 'mainnet'].includes(network)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid network parameter. Must be "beta" or "mainnet"'
+                });
+            }
+            networkValue = network;
+        }
+
         // Preparar datos para el ejecutor
         const migrationData = {
             morsePrivateKeys: morseWallets,
@@ -84,8 +97,10 @@ router.post('/migrate', async (req, res) => {
             }
         };
 
-        // Ejecutar migración
-        const result = await migrationExecutor.executeMigration(migrationData);
+        console.log(`🌐 Migration requested on network: ${networkValue}`);
+
+        // Ejecutar migración con el parámetro network
+        const result = await migrationExecutor.executeMigration(migrationData, { network: networkValue });
 
         res.json({
             success: true,
@@ -110,7 +125,10 @@ router.get('/health', async (req, res) => {
         const { promisify } = require('util');
         const execAsync = promisify(exec);
 
-        const { stdout } = await execAsync('pocketd version', { timeout: 5000 });
+        const pocketdPath = `${process.cwd()}/bin/pocketd`;
+        const { stdout } = await execAsync(`${pocketdPath} version`, {
+            timeout: 5000
+        });
         const version = stdout.trim();
 
         res.status(200).json({
@@ -178,6 +196,13 @@ router.post('/validate', async (req, res) => {
             details: error.message
         });
     }
+});
+
+/**
+ * POST /import-wallets - Importar wallets y obtener sus direcciones
+ */
+router.post('/import-wallets', async (req, res) => {
+    await migrationController.importWallets(req, res);
 });
 
 // Middleware de manejo de errores
