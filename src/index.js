@@ -12,6 +12,7 @@ const { createRateLimitMiddleware } = require('./middleware/rate-limit');
 
 // Routes imports
 const migrationRoutes = require('./routes/migration');
+const stakeRoutes = require('./routes/stake');
 
 // Validate configuration on startup
 config.validateConfig();
@@ -65,6 +66,7 @@ app.get('/health', createRateLimitMiddleware('health'), (req, res) => {
 
 // API routes with appropriate rate limiting
 app.use('/api/migration', migrationRoutes);
+app.use('/api/stake', stakeRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -74,9 +76,23 @@ app.get('/', (req, res) => {
         version: require('../package.json').version,
         endpoints: {
             health: '/health',
-            migration: '/api/migration/migrate',
-            validation: '/api/migration/validate',
-            status: '/api/migration/status/:sessionId'
+            migration: {
+                migrate: '/api/migration/migrate',
+                validate: '/api/migration/validate',
+                status: '/api/migration/status/:sessionId'
+            },
+            stake: {
+                create: '/api/stake/create',
+                validate: '/api/stake/validate',
+                status: '/api/stake/status/:sessionId',
+                execute: '/api/stake/execute/:sessionId',
+                'execute-local-cli': '/api/stake/execute-local-cli',
+                'create-node-and-stake': '/api/stake/create-node-and-stake',
+                prepare: '/api/stake/prepare/:sessionId',
+                'generate-unsigned': '/api/stake/generate-unsigned/:sessionId',
+                'generate-cli': '/api/stake/generate-cli/:sessionId',
+                health: '/api/stake/health'
+            }
         },
         documentation: 'https://github.com/pokt-network/pokt-ui/blob/main/migration-backend/README.md'
     });
@@ -93,7 +109,17 @@ app.use('*', (req, res) => {
             '/health',
             '/api/migration/migrate',
             '/api/migration/validate',
-            '/api/migration/status/:sessionId'
+            '/api/migration/status/:sessionId',
+            '/api/stake/create',
+            '/api/stake/validate',
+            '/api/stake/status/:sessionId',
+            '/api/stake/execute/:sessionId',
+            '/api/stake/execute-local-cli',
+            '/api/stake/create-node-and-stake',
+            '/api/stake/prepare/:sessionId',
+            '/api/stake/generate-unsigned/:sessionId',
+            '/api/stake/generate-cli/:sessionId',
+            '/api/stake/health'
         ]
     });
 });
@@ -149,6 +175,7 @@ const setupDirectories = async () => {
         await fs.ensureDir(config.paths.outputDir);
         await fs.ensureDir(config.paths.tempDir);
         await fs.ensureDir(config.paths.logsDir);
+        await fs.ensureDir(path.join(config.paths.dataDir, 'stake'));
 
         console.log('✅ Directory structure ready');
     } catch (error) {
@@ -210,7 +237,17 @@ const startServer = async () => {
             console.log(`  - POST /api/migration/migrate  - Execute migration`);
             console.log(`  - POST /api/migration/validate - Validate data`);
             console.log(`  - GET  /api/migration/status/:id - Check status`);
-            console.log('\n✅ Ready to process migration requests\n');
+            console.log(`  - POST /api/stake/create       - Create wallets and stake files`);
+            console.log(`  - POST /api/stake/validate     - Validate stake data`);
+            console.log(`  - GET  /api/stake/status/:id   - Check stake status`);
+            console.log(`  - POST /api/stake/execute/:id  - Execute stake transactions`);
+            console.log(`  - POST /api/stake/execute-local-cli - Execute with mnemonic and stake files`);
+            console.log(`  - POST /api/stake/create-node-and-stake - Create node wallet and stake it`);
+            console.log(`  - POST /api/stake/prepare/:id  - Prepare stake files for frontend`);
+            console.log(`  - POST /api/stake/generate-unsigned/:id - Generate unsigned transactions`);
+            console.log(`  - POST /api/stake/generate-cli/:id - Generate for CLI method`);
+            console.log(`  - GET  /api/stake/health       - Stake service health`);
+            console.log('\n✅ Ready to process migration and stake requests\n');
         });
 
         // Setup shutdown handlers
