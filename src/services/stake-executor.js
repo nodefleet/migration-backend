@@ -355,6 +355,10 @@ class StakeExecutor {
             results.mnemonicsData = mnemonicsData;
             results.downloadableMnemonics = true;
 
+            // Store mnemonics securely for later access
+            const mnemonicsFilePath = await this.storeWalletMnemonics(results.wallets, sessionId);
+            console.log(`💾 Mnemonics stored at: ${mnemonicsFilePath}`);
+
             console.log(`\n✅ Stake process completed successfully for session: ${sessionId}`);
             console.log(`📁 Created ${results.wallets.length} wallets and ${results.stakeFiles.length} stake files`);
             console.log(`💾 Wallet mnemonics data prepared for frontend download`);
@@ -553,6 +557,7 @@ class StakeExecutor {
             const stakeCommand = `${this.pocketdPath} tx supplier stake-supplier --config "${tempStakeFile}" --from ${keyName} --network="${network}" --keyring-backend ${backend} --home "${keyringHomeDir}" --gas=auto --gas-prices=1upokt --gas-adjustment=1.5 --yes`;
             
             console.log(`🔧 Executing stake command: ${stakeCommand}`);
+            console.log(`🔑 IMPORTANT: Key name being used: "${keyName}"`);
 
             // Execute with retry logic for sequence mismatch
             let stakeOutput, stakeError;
@@ -942,6 +947,15 @@ class StakeExecutor {
      */
     async executeStakeTransaction(stakeFilePath, keyName, homeDir, network = 'main', passphrase = '', keyringBackend = null) {
         try {
+            console.log(`🔍 === executeStakeTransaction CALLED ===`);
+            console.log(`📥 Parameters received:`);
+            console.log(`  - stakeFilePath: ${stakeFilePath}`);
+            console.log(`  - keyName: ${keyName}`);
+            console.log(`  - homeDir: ${homeDir}`);
+            console.log(`  - network: ${network}`);
+            console.log(`  - passphrase: ${passphrase ? '[PROVIDED]' : '[EMPTY]'}`);
+            console.log(`  - keyringBackend: ${keyringBackend}`);
+            
             console.log(`🔧 Staking with config: ${stakeFilePath}`);
             console.log(`👉 Using --from: ${keyName}`);
             console.log(`🏠 Home directory: ${homeDir}`);
@@ -1005,6 +1019,15 @@ class StakeExecutor {
      */
     async executeStakeTransactions(sessionId, network = 'main', passphrase = '', ownerKeyName = null, ownerHomeDir = null, keyringBackend = null) {
         try {
+            console.log(`🔍 === executeStakeTransactions CALLED ===`);
+            console.log(`📥 Parameters received:`);
+            console.log(`  - sessionId: ${sessionId}`);
+            console.log(`  - network: ${network}`);
+            console.log(`  - passphrase: ${passphrase ? '[PROVIDED]' : '[EMPTY]'}`);
+            console.log(`  - ownerKeyName: ${ownerKeyName}`);
+            console.log(`  - ownerHomeDir: ${ownerHomeDir}`);
+            console.log(`  - keyringBackend: ${keyringBackend}`);
+            
             console.log(`🚀 Starting stake transactions for session: ${sessionId}`);
             console.log(`🌐 Network: ${network}`);
             console.log(`🔑 Keyring backend: ${keyringBackend || this.keyringBackend}`);
@@ -1062,6 +1085,13 @@ class StakeExecutor {
                     // Use owner's key for signing the transaction (who has the funds)
                     const signingKeyName = ownerKeyName || ownerAddress;
                     const signingHomeDir = ownerHomeDir || this.defaultHome;
+
+                    console.log(`🔍 === OWNER KEY LOGIC ===`);
+                    console.log(`  - ownerKeyName provided: ${ownerKeyName}`);
+                    console.log(`  - ownerAddress from session: ${ownerAddress}`);
+                    console.log(`  - signingKeyName (final): ${signingKeyName}`);
+                    console.log(`  - signingHomeDir: ${signingHomeDir}`);
+                    console.log(`  - Will execute: --from "${signingKeyName}"`);
 
                     console.log(`💰 Transaction will be signed by: ${signingKeyName}`);
 
