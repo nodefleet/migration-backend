@@ -35,6 +35,43 @@ const migrationSchema = Joi.object({
     })
 });
 
+// Esquema de validación para migración de clave blindada
+const armoredMigrationSchema = Joi.object({
+    armoredKey: Joi.object({
+        kdf: Joi.string().required(),
+        salt: Joi.string().required(),
+        secparam: Joi.string().required(),
+        hint: Joi.string().allow(''),
+        ciphertext: Joi.string().required()
+    }).required().messages({
+        'any.required': 'Armored key object is required'
+    }),
+    passphrase: Joi.string().optional().allow('').messages({
+        'string.base': 'Passphrase must be a string'
+    }),
+    shannonAddress: Joi.alternatives().try(
+        Joi.string()
+            .pattern(/^(pokt|poktval)[0-9a-zA-Z]{39,43}$/)
+            .messages({
+                'string.pattern.base': 'Shannon address must start with "pokt" or "poktval" and have correct length'
+            }),
+        Joi.object({
+            address: Joi.string()
+                .pattern(/^(pokt|poktval)[0-9a-zA-Z]{39,43}$/)
+                .required()
+                .messages({
+                    'string.pattern.base': 'Shannon address must start with "pokt" or "poktval" and have correct length'
+                }),
+            signature: Joi.string().required()
+        })
+    ).optional().messages({
+        'alternatives.types': 'Shannon address can be a string or object with address and signature'
+    }),
+    network: Joi.string().valid('beta', 'mainnet').optional().messages({
+        'any.only': 'Network must be either "beta" or "mainnet"'
+    })
+});
+
 /**
  * POST /migrate - Ejecutar migración usando CLI claim-accounts REAL
  */
@@ -117,6 +154,90 @@ router.post('/migrate', async (req, res) => {
 });
 
 /**
+ * POST /migrate-armored - Ejecutar migración de cuenta individual usando clave blindada
+ */
+router.post('/migrate-armored', async (req, res) => {
+    try {
+        const { armoredKey, passphrase, shannonAddress, network } = req.body;
+
+        // Validar entrada usando el esquema Joi
+        const { error, value } = armoredMigrationSchema.validate({
+            armoredKey,
+            passphrase,
+            shannonAddress
+        });
+
+        if (error) {
+            return res.status(400).json({
+                success: false,
+                error: 'Validation failed',
+                details: error.details.map(detail => ({
+                    field: detail.path.join('.'),
+                    message: detail.message,
+                    value: detail.context?.value
+                }))
+            });
+        }
+
+        // Validar el parámetro network si está presente
+        let networkValue = 'beta'; // Valor por defecto
+        if (network) {
+            if (typeof network !== 'string' || !['beta', 'mainnet'].includes(network)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid network parameter. Must be "beta" or "mainnet"'
+                });
+            }
+            networkValue = network;
+        }
+
+        // Procesar Shannon address (similar a private key migration)
+        let shannonAddressValue;
+        let shannonSignature;
+
+        if (value.shannonAddress) {
+            if (typeof value.shannonAddress === 'object' && value.shannonAddress !== null) {
+                shannonAddressValue = value.shannonAddress.address;
+                shannonSignature = value.shannonAddress.signature;
+            } else {
+                shannonAddressValue = value.shannonAddress;
+            }
+        }
+
+        console.log(`🌐 Armored migration requested on network: ${networkValue}`);
+        console.log(`🔐 Armored key provided: ${!!value.armoredKey}`);
+        console.log(`🔑 Passphrase provided: ${!!value.passphrase}`);
+        console.log(`📍 Shannon address provided: ${!!shannonAddressValue}`);
+        console.log(`📝 Shannon signature provided: ${!!shannonSignature}`);
+
+        // Ejecutar migración con clave blindada
+        const result = await migrationExecutor.executeArmoredMigration(
+            null, // morseAddress not needed - it's in the armored key
+            value.armoredKey,
+            null, // supplierStake not supported
+            { 
+                network: networkValue,
+                passphrase: value.passphrase,
+                shannonAddress: shannonAddressValue,
+                shannonSignature: shannonSignature
+            }
+        );
+
+        res.json({
+            success: true,
+            data: result
+        });
+    } catch (error) {
+        console.error('Armored migration error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Unknown error',
+            details: error.toString()
+        });
+    }
+});
+
+/**
  * GET /health - Verificar estado del servicio y CLI
  */
 router.get('/health', async (req, res) => {
@@ -185,6 +306,65 @@ router.post('/validate', async (req, res) => {
                 shannonAddress: shannonAddress,
                 method: 'cli_claim_accounts',
                 readyForMigration: true
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            valid: false,
+            error: 'Internal validation error',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * POST /validate-armored - Validar datos de migración blindada sin ejecutar
+ */
+router.post('/validate-armored', async (req, res) => {
+    try {
+        const { error, value } = armoredMigrationSchema.validate(req.body);
+
+        if (error) {
+            return res.status(400).json({
+                success: false,
+                valid: false,
+                error: 'Validation failed',
+                details: error.details.map(detail => ({
+                    field: detail.path.join('.'),
+                    message: detail.message,
+                    value: detail.context?.value
+                }))
+            });
+        }
+
+        const { armoredKey, passphrase, shannonAddress } = value;
+
+        // Process Shannon address info for validation response
+        let shannonAddressValue;
+        let shannonSignature;
+        if (shannonAddress) {
+            if (typeof shannonAddress === 'object' && shannonAddress !== null) {
+                shannonAddressValue = shannonAddress.address;
+                shannonSignature = shannonAddress.signature;
+            } else {
+                shannonAddressValue = shannonAddress;
+            }
+        }
+
+        res.status(200).json({
+            success: true,
+            valid: true,
+            message: 'Armored migration data is valid for CLI execution',
+            data: {
+                armoredKeyProvided: !!armoredKey,
+                passphraseProvided: !!passphrase,
+                shannonAddressProvided: !!shannonAddressValue,
+                shannonSignatureProvided: !!shannonSignature,
+                method: 'cli_claim_account',
+                readyForMigration: true,
+                note: 'Morse address embedded in armored key. Shannon signing key can be provided for transaction signing.'
             }
         });
 

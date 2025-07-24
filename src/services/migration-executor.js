@@ -1,4 +1,4 @@
-const fs = require('fs').promises;
+const fs = require('fs-extra');
 const path = require('path');
 const { exec } = require('child_process');
 const { promisify } = require('util');
@@ -238,42 +238,76 @@ class MigrationExecutor {
             // Verificar si la cuenta alice ya existe
             try {
                 const { stdout } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home ${homeDir} --keyring-backend test`, {
-                    timeout: 10000
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
                 });
 
                 // Si ya existe alice, no hacer nada
                 if (stdout.includes('alice')) {
+                    console.log('✅ Alice account already exists');
                     return true;
                 }
             } catch (e) {
                 console.log('⚠️ Error listing keys, will try to create alice anyway');
             }
 
-            // Crear la cuenta alice para fines de generar la transacción
-            await execAsync(`${process.cwd()}/bin/pocketd keys add alice --home ${homeDir} --keyring-backend test`, {
-                timeout: 15000
-            });
+            console.log('🔑 Creating alice account...');
 
-            console.log('✅ Alice account created successfully');
+            // Crear la cuenta alice para fines de generar la transacción (non-interactive)
+            try {
+                const { stdout } = await execAsync(`${process.cwd()}/bin/pocketd keys add alice --home ${homeDir} --keyring-backend test --output json`, {
+                    timeout: 15000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
+
+                console.log('✅ Alice account created successfully');
+                console.log('📋 Alice account info:', stdout);
+            } catch (createError) {
+                // If creation fails, check if it's because the account already exists
+                if (createError.stderr && (createError.stderr.includes('already exists') || createError.stderr.includes('duplicated'))) {
+                    console.log('✅ Alice account already exists (caught from creation error)');
+                    return true;
+                }
+                
+                console.error('❌ Error creating alice account:', createError);
+                throw createError;
+            }
 
             // Verificar que se creó
-            const { stdout } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home ${homeDir} --keyring-backend test`, {
-                timeout: 10000
-            });
+            try {
+                const { stdout } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home ${homeDir} --keyring-backend test`, {
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
 
-            if (stdout.includes('alice')) {
-                console.log('✅ Verified alice account exists');
-                return true;
-            } else {
-                throw new Error('Alice account could not be verified after creation');
+                if (stdout.includes('alice')) {
+                    console.log('✅ Verified alice account exists');
+                    return true;
+                } else {
+                    console.log('⚠️ Alice account not found in keyring list, but continuing anyway');
+                    return true; // Continue anyway since we'll use Shannon key if available
+                }
+            } catch (verifyError) {
+                console.log('⚠️ Could not verify alice account, but continuing anyway');
+                return true; // Continue anyway since we'll use Shannon key if available
             }
+
         } catch (error) {
-            if (error.stderr && error.stderr.includes('already exists')) {
-                console.log('✅ Alice account already exists (caught from error)');
-                return true;
-            }
-            console.error('❌ Error checking/creating alice account:', error);
-            throw new Error(`Failed to create alice account: ${error.message}`);
+            console.error('❌ Error in ensureAliceAccount:', error);
+            
+            // Don't throw the error - just log it and continue
+            // The migration might still work if Shannon key is provided
+            console.log('⚠️ Alice account creation failed, but continuing with migration...');
+            return false;
         }
     }
 
@@ -555,16 +589,515 @@ class MigrationExecutor {
                 if (cmdError.stdout) console.log('Command stdout:', cmdError.stdout);
                 if (cmdError.stderr) console.log('Command stderr:', cmdError.stderr);
 
-                throw new Error(`Migration command failed: ${cmdError.message}`);
+                // Parse specific error types for better user experience
+                let errorMessage = 'Migration command failed.';
+                let errorType = 'unknown';
+
+                if (cmdError.stderr) {
+                    if (cmdError.stderr.includes('has already been claimed')) {
+                        // Parse the already claimed error for details
+                        const alreadyClaimedMatch = cmdError.stderr.match(/morse address "([^"]+)" has already been claimed at height (\d+) by shannon address "([^"]+)"/);
+                        if (alreadyClaimedMatch) {
+                            const [, morseAddr, height, shannonAddr] = alreadyClaimedMatch;
+                            errorMessage = `Morse account ${morseAddr} has already been migrated to Shannon address ${shannonAddr} at block height ${height}. Each Morse account can only be migrated once.`;
+                            errorType = 'already_claimed';
+                        } else {
+                            errorMessage = 'One or more Morse accounts have already been migrated to other Shannon addresses. Each Morse account can only be migrated once.';
+                            errorType = 'already_claimed';
+                        }
+                    } else if (cmdError.stderr.includes('account') && cmdError.stderr.includes('not found')) {
+                        errorMessage = 'Migration failed because the signing account lacks funds or was not found on the network.';
+                        errorType = 'account_not_found';
+                    } else if (cmdError.stderr.includes('insufficient funds') || cmdError.stderr.includes('insufficient account funds')) {
+                        errorMessage = 'Migration failed due to insufficient funds in the signing account.';
+                        errorType = 'insufficient_funds';
+                    } else if (cmdError.stderr.includes('0/') && cmdError.stderr.includes('claimable Morse accounts found')) {
+                        errorMessage = 'No claimable Morse accounts found in the snapshot. Please verify that the provided private keys correspond to valid Morse accounts that haven\'t been migrated yet.';
+                        errorType = 'no_claimable_accounts';
+                    } else {
+                        errorMessage = `Migration command failed: ${cmdError.message}`;
+                        errorType = 'generic';
+                    }
+                } else {
+                    errorMessage = `Migration command failed: ${cmdError.message}`;
+                    errorType = 'generic';
+                }
+
+                throw new Error(errorMessage);
             }
         } catch (error) {
             console.error(`CLI migration failed:`, error);
+
+            // Enhanced error response with type information
+            let errorType = 'unknown';
+            if (error.message.includes('already been migrated') || error.message.includes('already been claimed')) {
+                errorType = 'already_claimed';
+            } else if (error.message.includes('not found')) {
+                errorType = 'account_not_found';
+            } else if (error.message.includes('insufficient funds')) {
+                errorType = 'insufficient_funds';
+            } else if (error.message.includes('No claimable Morse accounts')) {
+                errorType = 'no_claimable_accounts';
+            }
+
+            return {
+                success: false,
+                error: error.message,
+                errorType: errorType,
+                details: error.toString(),
+                method: 'cli_claim_accounts',
+                network: network
+            };
+        }
+    }
+
+    /**
+     * Execute single account migration using armored key and claim-account command
+     * @param {string} morseAddress - Not used (morse address is in armored key)
+     * @param {Object} armoredKey - Armored (encrypted) private key JSON
+     * @param {Object} supplierStakeYaml - Not supported (supplier stake not available in claim-account)
+     * @param {Object} options - Migration options including network, passphrase, and Shannon signing key
+     */
+    async executeArmoredMigration(morseAddress, armoredKey, supplierStakeYaml, options = {}) {
+        const sessionId = uuidv4();
+        console.log(`🚀 Starting armored key migration session: ${sessionId}`);
+
+        // Get network from options or default to beta
+        const network = options.network || 'beta';
+        const passphrase = options.passphrase || '';
+        const shannonAddress = options.shannonAddress;
+        const shannonSignature = options.shannonSignature;
+        console.log(`🌐 Using network: ${network}`);
+
+        try {
+            // Validate inputs
+            this.validateArmoredMigrationData(armoredKey);
+
+            // Prepare armored key file
+            const armoredKeyFile = await this.prepareArmoredKeyFile(armoredKey, sessionId);
+
+            // Ensure alice account exists as fallback
+            const aliceExists = await this.ensureAliceAccount();
+
+            console.log(`🔐 Armored key file: ${armoredKeyFile}`);
+            console.log(`🔑 Passphrase provided: ${!!passphrase}`);
+            console.log(`📍 Shannon address provided: ${!!shannonAddress}`);
+            console.log(`📝 Shannon signature provided: ${!!shannonSignature}`);
+            console.log(`👤 Alice account available: ${aliceExists}`);
+
+            // Check if we have a signing option available
+            if (!aliceExists && !shannonSignature) {
+                throw new Error('No signing account available. Alice account creation failed and no Shannon signature provided.');
+            }
+
+            // Execute single account migration command
+            const result = await this.runArmoredMigrationCommand(
+                armoredKeyFile,
+                sessionId,
+                network,
+                passphrase,
+                shannonAddress,
+                shannonSignature,
+                aliceExists
+            );
+
+            console.log(`✅ Armored migration session completed: ${sessionId}`);
+            return {
+                success: true,
+                sessionId,
+                result,
+                timestamp: new Date().toISOString(),
+                network
+            };
+
+        } catch (error) {
+            console.error(`❌ Armored migration session failed: ${sessionId}`, error);
+
+            // Clean up on error
+            await this.cleanup(sessionId);
+
+            throw {
+                success: false,
+                sessionId,
+                error: error.message,
+                timestamp: new Date().toISOString(),
+                network
+            };
+        }
+    }
+
+    /**
+     * Validate armored migration data
+     */
+    validateArmoredMigrationData(armoredKey) {
+        if (!armoredKey || typeof armoredKey !== 'object') {
+            throw new Error('Invalid armored key: must be an object');
+        }
+
+        // Validate armored key structure
+        const requiredFields = ['kdf', 'salt', 'secparam', 'ciphertext'];
+        for (const field of requiredFields) {
+            if (!armoredKey[field]) {
+                throw new Error(`Invalid armored key: missing required field '${field}'`);
+            }
+        }
+    }
+
+    /**
+     * Prepare armored key file
+     */
+    async prepareArmoredKeyFile(armoredKey, sessionId) {
+        const fileName = `armored-key-${sessionId}.json`;
+        const filePath = path.join(this.tempDir, fileName);
+        
+        await fs.writeFile(filePath, JSON.stringify(armoredKey, null, 2), 'utf8');
+        console.log(`📄 Armored key file created: ${filePath}`);
+        
+        return filePath;
+    }
+
+    // Note: Supplier stake files are not supported with claim-account command
+    // This command only works with the armored key file which contains all necessary information
+
+    /**
+     * Run the armored key migration command using claim-account
+     */
+    async runArmoredMigrationCommand(armoredKeyFile, sessionId, network = 'beta', passphrase = '', shannonAddress = null, shannonSignature = null, aliceExists = true) {
+        try {
+            // Definir directorio home para pocketd
+            const homeDir = path.resolve(path.join(process.cwd(), 'localnet/pocketd'));
+            if (!require('fs').existsSync(homeDir)) {
+                require('fs').mkdirSync(homeDir, { recursive: true });
+            }
+
+            const keyringBackend = 'test';
+
+            // IMPORTAR LA CUENTA SHANNON (similar al código de private key migration)
+            const shannonKeyName = `shannon-${sessionId.substring(0, 8)}`;
+            let useAliceForSigning = false;
+
+            // Vaciar el keyring antes de importar la clave Shannon
+            try {
+                console.log('🧹 Limpiando el keyring antes de importar la clave Shannon...');
+
+                // Listar todas las claves existentes
+                const { stdout: existingKeys } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home=${homeDir} --keyring-backend=${keyringBackend}`, {
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
+
+                console.log('🔑 Claves existentes en el keyring:');
+                console.log(existingKeys);
+
+                // Eliminar todas las claves existentes
+                const keyLines = existingKeys.split('\n');
+                for (const line of keyLines) {
+                    if (line.includes('name:')) {
+                        const keyName = line.replace('- name:', '').trim();
+                        if (keyName) {
+                            try {
+                                console.log(`🗑️ Eliminando clave: ${keyName}`);
+                                await execAsync(`${process.cwd()}/bin/pocketd keys delete ${keyName} --home=${homeDir} --keyring-backend=${keyringBackend} --yes`, {
+                                    timeout: 10000,
+                                    env: {
+                                        ...process.env,
+                                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                    }
+                                });
+                            } catch (deleteError) {
+                                console.error(`⚠️ Error al eliminar clave ${keyName}:`, deleteError.message);
+                            }
+                        }
+                    }
+                }
+
+                console.log('✅ Keyring limpiado correctamente');
+            } catch (cleanError) {
+                console.error('⚠️ Error al limpiar el keyring:', cleanError.message);
+            }
+
+            // Importar la cuenta Shannon si se proporciona
+            if (shannonSignature) {
+                try {
+                    // Limpiar espacios
+                    let cleanSignature = shannonSignature.trim();
+
+                    // Detectar si es una mnemónica (frase semilla)
+                    const wordCount = cleanSignature.split(' ').length;
+                    const isMnemonic = wordCount >= 12 && wordCount <= 24;
+
+                    if (isMnemonic) {
+                        console.log(`Detectada mnemónica Shannon (${wordCount} palabras)`);
+
+                        try {
+                            // Crear un archivo temporal con la mnemónica
+                            const mnemonicFile = path.join(this.tempDir, `mnemonic-${sessionId}.txt`);
+                            await fs.writeFile(mnemonicFile, cleanSignature);
+
+                            // Usar el comando add con --recover y --source para importar desde archivo
+                            const importCmd = `${process.cwd()}/bin/pocketd keys add ${shannonKeyName} --recover --source=${mnemonicFile} --home=${homeDir} --keyring-backend=${keyringBackend}`;
+
+                            const { stdout, stderr } = await execAsync(importCmd, {
+                                timeout: 30000,
+                                env: {
+                                    ...process.env,
+                                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                }
+                            });
+
+                            // Eliminar el archivo temporal
+                            await fs.unlink(mnemonicFile);
+
+                            console.log(`✅ Clave Shannon importada desde mnemónica: ${stdout}`);
+                        } catch (importError) {
+                            // Verificar si el error es porque la clave ya existe
+                            if (importError.stderr && importError.stderr.includes('duplicated address')) {
+                                console.log(`✅ La clave Shannon ya existe en el keyring, continuando...`);
+                            } else {
+                                // Si es otro error, usamos alice como fallback
+                                console.error('Error importing Shannon key:', importError.message);
+                                if (importError.stderr) console.error('Error details:', importError.stderr);
+                                useAliceForSigning = true;
+                            }
+                        }
+                    } else {
+                        // Quitar 0x si existe (para claves hex)
+                        if (cleanSignature.startsWith('0x')) {
+                            cleanSignature = cleanSignature.substring(2);
+                        }
+
+                        try {
+                            // Importar la clave Shannon como hexadecimal
+                            const importShannonCmd = `${process.cwd()}/bin/pocketd keys import-hex ${shannonKeyName} "${cleanSignature}" --home=${homeDir} --keyring-backend=${keyringBackend}`;
+                            const { stdout, stderr } = await execAsync(importShannonCmd, {
+                                timeout: 30000,
+                                env: {
+                                    ...process.env,
+                                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                                }
+                            });
+
+                            console.log(`✅ Clave Shannon importada como hex: ${stdout}`);
+                        } catch (importError) {
+                            // Verificar si el error es porque la clave ya existe
+                            if (importError.stderr && (importError.stderr.includes('duplicated address') || importError.stderr.includes('already exists'))) {
+                                console.log(`✅ La clave Shannon ya existe en el keyring, continuando...`);
+                            } else {
+                                // Si es otro error, usamos alice como fallback
+                                console.error('Error importing Shannon key:', importError.message);
+                                if (importError.stderr) console.error('Error details:', importError.stderr);
+                                useAliceForSigning = true;
+                            }
+                        }
+                    }
+                } catch (shannonImportError) {
+                    console.error('Error importing Shannon key:', shannonImportError.message);
+                    if (shannonImportError.stderr) console.error('Error details:', shannonImportError.stderr);
+                    useAliceForSigning = true;
+                }
+            } else {
+                // Si no hay firma Shannon, usamos alice (si existe)
+                if (aliceExists) {
+                    useAliceForSigning = true;
+                } else {
+                    throw new Error('No signing account available. Shannon signature not provided and alice account not available.');
+                }
+            }
+
+            // Verificar que las claves se importaron correctamente
+            try {
+                const { stdout: keyInfo } = await execAsync(`${process.cwd()}/bin/pocketd keys list --home=${homeDir} --keyring-backend=${keyringBackend}`, {
+                    timeout: 10000,
+                    env: {
+                        ...process.env,
+                        PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                    }
+                });
+
+                console.log('🔑 Available keys in keyring:');
+                console.log(keyInfo);
+
+                // Si la clave Shannon no está en la lista, usar alice si está disponible
+                if (!keyInfo.includes(shannonKeyName)) {
+                    console.log(`⚠️ Shannon key ${shannonKeyName} not found in keyring`);
+                    if (aliceExists && keyInfo.includes('alice')) {
+                        console.log(`✅ Using alice account for signing`);
+                        useAliceForSigning = true;
+                    } else {
+                        throw new Error('No valid signing account found in keyring');
+                    }
+                }
+            } catch (error) {
+                console.error('Error listing keys:', error);
+                if (aliceExists) {
+                    console.log('⚠️ Using alice as fallback');
+                    useAliceForSigning = true;
+                } else {
+                    throw new Error('No signing account available and keyring verification failed');
+                }
+            }
+
+            // Determinar qué clave usar para firmar
+            const signingKeyName = useAliceForSigning ? 'alice' : shannonKeyName;
+            console.log(`🔑 Using ${signingKeyName} for signing the transaction`);
+
+            // Configurar parámetros según la red
+            let chainId, nodeUrl, net;
+            if (network === 'mainnet') {
+                net = 'main';
+                chainId = 'pocket';
+                nodeUrl = 'https://shannon-grove-rpc.mainnet.poktroll.com';
+            } else {
+                // Default: beta
+                net = 'beta';
+                chainId = 'pocket-beta';
+                nodeUrl = 'https://rpc.shannon-testnet.eu.nodefleet.net';
+            }
+
+            console.log(`🌐 Using network: ${network}, chain-id: ${chainId}, node: ${nodeUrl}`);
+
+            // Build the claim-account command - only takes armored key file as argument
+            let command = `pocketd tx migration claim-account ${armoredKeyFile}` +
+                ` --from=${signingKeyName}` +
+                ` --network=${net}` +
+                ` --home=${homeDir}` +
+                ` --keyring-backend=${keyringBackend}` +
+                ` --chain-id=${chainId}` +
+                ` --gas=auto` +
+                ` --gas-prices=1upokt` +
+                ` --gas-adjustment=1.5` +
+                ` --node=${nodeUrl}`;
+
+            // Handle passphrase - use --no-passphrase if empty, otherwise provide passphrase
+            if (!passphrase || passphrase.trim() === '') {
+                command += ` --no-passphrase`;
+            } else {
+                command += ` --passphrase="${passphrase}"`;
+            }
+
+            command += ` --yes`;
+
+            console.log(`⚡ Executing armored migration command...`);
+
+            const { stdout, stderr } = await execAsync(command, {
+                timeout: 120000, // 2 minutos de timeout
+                env: {
+                    ...process.env,
+                    PATH: `${process.env.PATH}:${process.cwd()}/bin:/usr/local/bin`
+                }
+            });
+
+            console.log('📤 Command stdout:', stdout);
+            if (stderr) console.log('⚠️ Command stderr:', stderr);
+
+            // Parse the result from stdout
+            try {
+                // Check if command produced the expected output (morse info extracted)
+                const morsePublicKeyMatch = stdout.match(/morse_public_key:\s*(.+)/);
+                const morseSignatureMatch = stdout.match(/morse_signature:\s*(.+)/);
+                const shannonDestMatch = stdout.match(/shannon_dest_address:\s*(.+)/);
+                const shannonSigningMatch = stdout.match(/shannon_signing_address:\s*(.+)/);
+
+                if (morsePublicKeyMatch && shannonDestMatch) {
+                    // Successfully processed armored key file
+                    const extractedInfo = {
+                        morsePublicKey: morsePublicKeyMatch[1].trim(),
+                        morseSignature: morseSignatureMatch ? morseSignatureMatch[1].trim() : null,
+                        shannonDestAddress: shannonDestMatch[1].trim(),
+                        shannonSigningAddress: shannonSigningMatch ? shannonSigningMatch[1].trim() : null
+                    };
+
+                    // Look for transaction hash in the output
+                    const txHashMatch = stdout.match(/txhash:\s*([A-Fa-f0-9]+)/);
+                    const txHash = txHashMatch ? txHashMatch[1] : null;
+
+                    if (txHash) {
+                        // Transaction was successful
+                        return {
+                            success: true,
+                            txHash: txHash,
+                            extractedInfo: extractedInfo,
+                            output: stdout,
+                            method: 'cli_claim_account',
+                            network: network
+                        };
+                    } else {
+                        // Armored key processed but transaction failed - determine specific error
+                        let errorMessage = 'Armored key processed successfully, but transaction failed.';
+                        let errorType = 'unknown';
+
+                        // Check for specific error patterns
+                        if (stderr.includes('has already been claimed')) {
+                            // Parse the already claimed error for details
+                            const alreadyClaimedMatch = stderr.match(/morse address "([^"]+)" has already been claimed at height (\d+) by shannon address "([^"]+)"/);
+                            if (alreadyClaimedMatch) {
+                                const [, morseAddr, height, shannonAddr] = alreadyClaimedMatch;
+                                errorMessage = `This Morse account (${morseAddr}) has already been migrated to Shannon address ${shannonAddr} at block height ${height}. Each Morse account can only be migrated once.`;
+                                errorType = 'already_claimed';
+                            } else {
+                                errorMessage = 'This Morse account has already been migrated to another Shannon address. Each Morse account can only be migrated once.';
+                                errorType = 'already_claimed';
+                            }
+                        } else if (stderr.includes('account') && stderr.includes('not found')) {
+                            errorMessage = 'Transaction failed because the signing account lacks funds or was not found on the network.';
+                            errorType = 'account_not_found';
+                        } else if (stderr.includes('insufficient funds') || stderr.includes('insufficient account funds')) {
+                            errorMessage = 'Transaction failed due to insufficient funds in the signing account.';
+                            errorType = 'insufficient_funds';
+                        } else {
+                            // Generic fallback
+                            errorMessage = 'Armored key processed successfully, but transaction failed. This usually means the signing account lacks funds or the destination account is not found on the network.';
+                            errorType = 'generic';
+                        }
+
+                        return {
+                            success: false,
+                            error: errorMessage,
+                            errorType: errorType,
+                            extractedInfo: extractedInfo,
+                            output: stdout,
+                            stderr: stderr,
+                            method: 'cli_claim_account',
+                            network: network
+                        };
+                    }
+                } else {
+                    // Command didn't produce expected output
+                    return {
+                        success: false,
+                        error: 'Failed to extract information from armored key file',
+                        output: stdout,
+                        stderr: stderr,
+                        method: 'cli_claim_account',
+                        network: network
+                    };
+                }
+            } catch (parseError) {
+                console.error('Error parsing command output:', parseError);
+                return {
+                    success: false,
+                    error: 'Failed to parse command output',
+                    output: stdout,
+                    stderr: stderr,
+                    method: 'cli_claim_account',
+                    network: network
+                };
+            }
+
+        } catch (error) {
+            console.error(`Armored migration command failed:`, error);
+
+            if (error.stdout) console.log('Command stdout:', error.stdout);
+            if (error.stderr) console.log('Command stderr:', error.stderr);
 
             return {
                 success: false,
                 error: error.message,
                 details: error.toString(),
-                method: 'cli_claim_accounts',
+                method: 'cli_claim_account',
                 network: network
             };
         }

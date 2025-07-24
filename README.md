@@ -41,38 +41,96 @@ Environment variables (see `.env.example`):
 
 ---
 
-## REST API
+## API Endpoints
 
-### 1. `GET /api/migration/health`
+### Private Key Migration (Bulk)
 
-Returns a heartbeat for the service and validates that `pocketd` is available.
+**POST** `/api/migration/migrate`
 
-**Response 200 – OK**
-```json
-{
-  "success": true,
-  "message": "Migration backend is healthy",
-  "status": "operational",
-  "cli": {
-    "version": "v0.1.12-dev1",
-    "available": true,
-    "command": "claim-accounts",
-    "method": "cli_real"
-  },
-  "timestamp": "2025-01-01T12:00:00.000Z"
-}
+Migrates multiple accounts using raw private keys (hex format or JSON wallets).
+
+```bash
+curl -X POST http://localhost:3001/api/migration/migrate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "morseWallets": ["0x123abc...", "{\"priv\":\"456def...\",\"addr\":\"789...\"}"],
+    "shannonAddress": "pokt14ujjc89tud8lpwmjrffnjujw6y8vuupd5n4qzd",
+    "network": "mainnet"
+  }'
 ```
 
-**Response 503 – Degraded / CLI missing**
-```json
-{
-  "success": false,
-  "message": "Service unavailable",
-  "status": "degraded",
-  "error": "pocketd not found",
-  "timestamp": "..."
-}
+### Armored Key Migration (Single Account) ✨ NEW
+
+**POST** `/api/migration/migrate-armored`
+
+Migrates a single account using an armored (encrypted) private key. This uses the `claim-account` command instead of `claim-accounts`.
+
+```bash
+curl -X POST http://localhost:3001/api/migration/migrate-armored \
+  -H "Content-Type: application/json" \
+  -d '{
+    "armoredKey": {
+      "kdf": "scrypt",
+      "salt": "8CF326A35F4CBDF6F9C12930EDF90156",
+      "secparam": "12",
+      "hint": "",
+      "ciphertext": "nKg0o3fzX1FkADkA+yy0K6JGqjDTY..."
+    },
+    "passphrase": "mypassword123",
+    "network": "beta"
+  }'
 ```
+
+**Request Parameters:**
+- `armoredKey` (required): Object with PKK armored key structure
+  - `kdf`: Key derivation function (e.g., "scrypt")
+  - `salt`: Salt value for encryption
+  - `secparam`: Security parameter
+  - `hint`: Password hint (optional, can be empty string)
+  - `ciphertext`: Encrypted private key data
+- `passphrase` (optional): Decryption passphrase (empty string or omit for no passphrase)
+- `network` (optional): "beta" or "mainnet" (default: "beta")
+
+**Important Notes:**
+- The armored key contains both the Morse account info AND the Shannon destination address
+- The signing account (`alice`) must have funds on the target network to pay transaction fees
+- Morse address and supplier stake configuration are embedded in the armored key file
+
+**Generated Command Structure:**
+```bash
+pocketd tx migration claim-account <armored_key_file.json> \
+  --from=alice \
+  --network=<network> \
+  --home=<home> \
+  --keyring-backend=test \
+  --chain-id=<chain-id> \
+  --gas=auto \
+  --gas-prices=1upokt \
+  --gas-adjustment=1.5 \
+  --node=<node> \
+  --no-passphrase  # OR --passphrase="password"
+  --yes
+```
+
+**Expected Response (Success):**
+- The command extracts Morse account information from the armored key
+- Creates a migration transaction to the Shannon destination address embedded in the key
+- Returns transaction hash if successful
+
+**Expected Response (Partial Success):**
+- If the armored key is processed successfully but transaction fails (due to insufficient funds), you'll get:
+  - `success: false` but with extracted information showing the command worked
+  - `extractedInfo` containing the Morse and Shannon addresses
+  - Error message indicating funding/account issues
+
+### Validation Endpoints
+
+**POST** `/api/migration/validate` - Validate private key migration data
+**POST** `/api/migration/validate-armored` - Validate armored key migration data ✨ NEW
+
+### Health Check
+
+**GET** `/api/migration/health` - Check service status and CLI availability
 
 ---
 
