@@ -9,7 +9,9 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3001
-      - CORS_ORIGIN=https://migration.shannon.nodefleet.net,http://localhost:5173
+      - CORS_ORIGIN=https://migration.shannon.nodefleet.net,http://localhost:5173,https://nodes.nodefleet.org
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

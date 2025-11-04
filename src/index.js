@@ -13,6 +13,7 @@ const { createRateLimitMiddleware } = require('./middleware/rate-limit');
 // Routes imports
 const migrationRoutes = require('./routes/migration');
 const stakeRoutes = require('./routes/stake');
+const discordRoutes = require('./routes/discord');
 
 // Validate configuration on startup
 config.validateConfig();
@@ -67,6 +68,7 @@ app.get('/health', createRateLimitMiddleware('health'), (req, res) => {
 // API routes with appropriate rate limiting
 app.use('/api/migration', migrationRoutes);
 app.use('/api/stake', stakeRoutes);
+app.use('/api/discord', discordRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -92,6 +94,9 @@ app.get('/', (req, res) => {
                 'generate-unsigned': '/api/stake/generate-unsigned/:sessionId',
                 'generate-cli': '/api/stake/generate-cli/:sessionId',
                 health: '/api/stake/health'
+            },
+            discord: {
+                'verify-member': '/api/discord/verify-member'
             }
         },
         documentation: 'https://github.com/pokt-network/pokt-ui/blob/main/migration-backend/README.md'
@@ -119,7 +124,8 @@ app.use('*', (req, res) => {
             '/api/stake/prepare/:sessionId',
             '/api/stake/generate-unsigned/:sessionId',
             '/api/stake/generate-cli/:sessionId',
-            '/api/stake/health'
+            '/api/stake/health',
+            '/api/discord/verify-member'
         ]
     });
 });
@@ -247,6 +253,7 @@ const startServer = async () => {
             console.log(`  - POST /api/stake/generate-unsigned/:id - Generate unsigned transactions`);
             console.log(`  - POST /api/stake/generate-cli/:id - Generate for CLI method`);
             console.log(`  - GET  /api/stake/health       - Stake service health`);
+            console.log(`  - POST /api/discord/verify-member - Verify Discord member roles`);
             console.log('\n✅ Ready to process migration and stake requests\n');
         });
 

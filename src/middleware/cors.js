@@ -1,8 +1,9 @@
 const cors = require('cors');
 
 // CORS configuration for migration backend - ALLOW ALL ORIGINS
+// Explicitly allows: migration.shannon.nodefleet.net, nodes.nodefleet.org, and all other origins
 const corsOptions = {
-    origin: '*', // Allow all origins
+    origin: '*', // Allow all origins (including nodes.nodefleet.org)
     credentials: true, // Allow cookies and authorization headers
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
